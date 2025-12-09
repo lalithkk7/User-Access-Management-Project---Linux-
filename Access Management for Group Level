@@ -1,1 +1,132 @@
+#!/bin/bash
+# ========================================
+# Script Name   : access_group_setup.sh
+# Type          : Group-Level Access Management
+# Author        : Lalith Kishore - Linux Engineer, RMDC
+# Created/Updated: 2025-12-09
+# Description   : Automates creation of user groups, 
+#                 assigns users, sets sudoers rules, 
+#                 and configures secure log access.
+# ========================================
+
+# ========================================
+# Access & Group Automation Script (Production Ready)
+# ========================================
+
+LOGFILE="/var/log/access_setup.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "========================================="
+echo " Starting Access & Group Automation - $(date)"
+echo "========================================="
+
+# -----------------------------------------
+# 1. CREATE GROUPS
+# -----------------------------------------
+echo "[1/6] Creating groups..."
+for g in superadmin rmdc_fse rogroup; do
+    if getent group "$g" > /dev/null; then
+        echo "$(date) - Group '$g' already exists."
+    else
+        sudo groupadd "$g"
+        echo "$(date) - Created group: $g"
+    fi
+done
+
+# -----------------------------------------
+# 2. ASSIGN USERS TO GROUPS
+# -----------------------------------------
+echo
+echo "[2/6] Assign users to groups (optional)."
+read -p "Users for superadmin (comma-separated): " SA_USERS
+read -p "Users for rmdc_fse (comma-separated): " RMDC_USERS
+read -p "Users for rogroup (comma-separated): " RO_USERS
+
+assign_users() {
+    local users=$1
+    local group=$2
+
+    if [[ -n "$users" ]]; then
+        IFS=',' read -ra LIST <<< "$users"
+        for u in "${LIST[@]}"; do
+            u=$(echo "$u" | xargs)
+            if id "$u" &>/dev/null; then
+                sudo usermod -aG "$group" "$u"
+                echo "$(date) - Added user '$u' to group '$group'."
+            else
+                echo "$(date) - User '$u' does NOT exist — skipping."
+            fi
+        done
+    else
+        echo "$(date) - No users provided for group '$group'."
+    fi
+}
+
+assign_users "$SA_USERS" superadmin
+assign_users "$RMDC_USERS" rmdc_fse
+assign_users "$RO_USERS" rogroup
+
+# -----------------------------------------
+# 3. SUDO ACCESS FOR superadmin
+# -----------------------------------------
+echo
+echo "[3/6] Granting full root access to 'superadmin'..."
+echo "%superadmin ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/superadmin >/dev/null
+sudo chmod 440 /etc/sudoers.d/superadmin
+echo "$(date) - superadmin group now has FULL root access."
+
+# -----------------------------------------
+# 4. LIMITED SUDO FOR rmdc_fse
+# -----------------------------------------
+echo
+echo "[4/6] Setting limited sudo for rmdc_fse..."
+# Status commands: no password
+echo "%rmdc_fse ALL=(root) NOPASSWD: /bin/systemctl status *, /usr/bin/systemctl status *" | sudo tee /etc/sudoers.d/rmdc_fse >/dev/null
+# Restart commands: require password
+echo "%rmdc_fse ALL=(root): /bin/systemctl restart *, /usr/bin/systemctl restart *" | sudo tee -a /etc/sudoers.d/rmdc_fse >/dev/null
+sudo chmod 440 /etc/sudoers.d/rmdc_fse
+echo "$(date) - rmdc_fse group can run systemctl status without password, restart with password."
+
+# -----------------------------------------
+# 5. LIMITED SUDO FOR rogroup + LOG ACCESS
+# -----------------------------------------
+echo
+echo "[5/6] Setting rogroup log access..."
+# Allow rogroup to use journalctl (read-only)
+echo "%rogroup ALL=NOPASSWD: /usr/bin/journalctl" | sudo tee /etc/sudoers.d/rogroup >/dev/null
+sudo chmod 440 /etc/sudoers.d/rogroup
+
+# Add each rogroup user to adm group for log reading
+IFS=',' read -ra RO_USER_LIST <<< "$RO_USERS"
+for u in "${RO_USER_LIST[@]}"; do
+    u=$(echo "$u" | xargs)
+    if id "$u" &>/dev/null; then
+        sudo usermod -aG adm "$u"
+        echo "$(date) - Added '$u' to adm group for log access."
+    fi
+done
+
+# -----------------------------------------
+# 6. DISABLE ROOT LOGIN
+# -----------------------------------------
+echo
+echo "[6/6] Disabling direct root login..."
+sudo passwd -l root
+if command -v systemctl >/dev/null 2>&1; then
+    sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+    sudo systemctl restart sshd
+fi
+echo "$(date) - Root login disabled. Only superadmin can use sudo su -."
+
+# -----------------------------------------
+# SUMMARY
+# -----------------------------------------
+echo
+echo "========================================="
+echo " Automation Completed Successfully! - $(date)"
+echo "========================================="
+echo "superadmin -> FULL root access + sudo su -"
+echo "rmdc_fse   -> status commands (no password) + restart commands (password)"
+echo "rogroup    -> read-only log access via journalctl and /var/log/ (adm group)"
+echo
+echo "Log saved to $LOGFILE"
 
